@@ -7,7 +7,7 @@ only_build_toc_files: false
 
 html:
   favicon : "figures/TB_favicon.ico"
-  baseurl :  "https://naresh-ub.github.io/cvip" #Replace this with your own URL
+  baseurl :  "https://naresh-ub.github.io/cvip-summer25" #Replace this with your own URL
   extra_css: ["_static/color.css"]
   extra_js: ["_static/analytics.js"]
 
@@ -25,10 +25,10 @@ sphinx:
       preexecute: ["thebe-init"] # Automatically execute cells with this tag
     html_theme_options:
       logo:
-        text: CSE 4/573 - CVIP
+        text: Summer 2025
         image_light: figures/logo.png # Put your logo for the light mode here (can be the same as image_dark)
         image_dark: figures/logo_dark.png # Put your logo for the dark mode here (can be the same as image_light)
-      repository_url: "https://github.com/naresh-ub/cvip" #add your own repo URL here
+      repository_url: "https://github.com/naresh-ub/cvip-summer25" #add your own repo URL here
       path_to_docs: "book"
       repository_branch: "main"
       use_edit_page_button: false
