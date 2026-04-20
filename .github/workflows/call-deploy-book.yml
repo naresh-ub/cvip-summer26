@@ -1,16 +1,14 @@
 name: deploy-book
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - '**'
 
 env:
   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Prefer GH_PAT if present, otherwise fall back to GITHUB_TOKEN
   GH_TOKEN: ${{ secrets.GH_PAT != '' && secrets.GH_PAT || secrets.GITHUB_TOKEN }}
-
   PRIMARY_BRANCH: ${{ vars.PRIMARY_BRANCH != '' && vars.PRIMARY_BRANCH || 'main' }}
   BEHAVIOR_PRIMARY: ${{ vars.BEHAVIOR_PRIMARY != '' && vars.BEHAVIOR_PRIMARY || 'move' }}
   BRANCH_ALIASES: ${{ vars.BRANCH_ALIASES }}
@@ -22,12 +20,14 @@ jobs:
   get-branches:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    outputs:
-      branches: ${{ steps.set-branches.outputs.branches }}
     permissions:
       contents: read
+    outputs:
+      branches: ${{ steps.set-branches.outputs.branches }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -38,12 +38,12 @@ jobs:
           set -euo pipefail
 
           if [ "$BRANCHES_TO_DEPLOY" = "*" ]; then
-            branches=$(git branch -r | sed 's,^[[:space:]]*origin/,,g' | grep -v '\->')
+            branches=$(git branch -r | sed 's,^[[:space:]]*origin/,,g' | grep -v '\->' || true)
           else
             branches=$(echo "$BRANCHES_TO_DEPLOY" | tr ' ' '\n' | grep -E '\S' || true)
           fi
 
-          echo "$branches" | tr ' ' '\n' > branches.txt
+          printf '%s\n' "$branches" > branches.txt
           branches_json=$(printf '%s\n' "$branches" | jq -Rn '[inputs | select(length > 0)]')
           echo "branches=$branches_json" >> "$GITHUB_OUTPUT"
 
@@ -52,14 +52,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "${BRANCH_ALIASES:-}" | tr ' ' '\n' | grep -E '\S' > rules.txt || true
+          printf '%s\n' "${BRANCH_ALIASES:-}" | tr ' ' '\n' | grep -E '\S' > rules.txt || true
           cut -d: -f1 rules.txt > aliases.txt || true
           cut -d: -f2 rules.txt > targets.txt || true
 
           if [ -s aliases.txt ]; then
             while IFS= read -r alias; do
               if grep -Fxq "$alias" branches.txt; then
-                echo "::error ::Alias \"$alias\" given in \$BRANCH_ALIASES conflicts with existing branch."
+                echo "::error::Alias \"$alias\" conflicts with an existing branch."
                 exit 1
               fi
             done < aliases.txt
@@ -68,14 +68,14 @@ jobs:
           if [ -s targets.txt ]; then
             while IFS= read -r target; do
               if ! grep -Fxq "$target" branches.txt; then
-                echo "::error ::Branch \"$target\" given in \$BRANCH_ALIASES does not exist."
+                echo "::error::Target branch \"$target\" in BRANCH_ALIASES does not exist."
                 exit 1
               fi
             done < targets.txt
           fi
 
           if [ -s aliases.txt ] && [ "$(sort aliases.txt | uniq -d | wc -l)" -gt 0 ]; then
-            echo "::error ::Duplicate aliases in \$BRANCH_ALIASES: \"$BRANCH_ALIASES\""
+            echo "::error::Duplicate aliases found in BRANCH_ALIASES."
             exit 1
           fi
 
@@ -88,12 +88,14 @@ jobs:
       pages: write
       id-token: write
       contents: read
+
     strategy:
       fail-fast: false
       matrix:
         branch: ${{ fromJson(needs.get-branches.outputs.branches) }}
+
     steps:
-      - name: Checkout to branch
+      - name: Checkout branch
         uses: actions/checkout@v4
         with:
           ref: ${{ matrix.branch }}
@@ -119,8 +121,6 @@ jobs:
             echo false >> EXTRA_CACHE_VARS.txt
           fi
 
-          cat EXTRA_CACHE_VARS.txt
-
       - name: Cache page build
         id: cache-html
         uses: actions/cache@v4
@@ -128,19 +128,19 @@ jobs:
           path: book/_build/html
           key: html-build-${{ matrix.branch }}-${{ hashFiles('book/**', 'requirements.txt', 'EXTRA_CACHE_VARS.txt') }}
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Set up Python 3.11
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         id: setup-python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Record current date for cache
+      - name: Record current week
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         run: echo "WEEK=$(date +%V)" >> "$GITHUB_ENV"
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Install system dependencies
+      - name: Install system dependencies
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -155,15 +155,15 @@ jobs:
             dvipng \
             gettext-base
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Cache virtualenv
+      - name: Cache virtualenv
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         uses: actions/cache@v4
         with:
           key: venv-${{ runner.os }}-${{ steps.setup-python.outputs.python-version }}-${{ hashFiles('requirements.txt') }}-week${{ env.WEEK }}-${{ github.repository }}
           path: .venv
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Install dependencies
+      - name: Install dependencies
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -175,31 +175,30 @@ jobs:
           echo "$VIRTUAL_ENV/bin" >> "$GITHUB_PATH"
           echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> "$GITHUB_ENV"
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Insert banner if archived
+      - name: Insert banner if archived
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
 
-          OWNER="${GITHUB_REPOSITORY%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
+          owner="${GITHUB_REPOSITORY%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
 
-          if [ "$REPO" = "${OWNER}.github.io" ]; then
-            SITE_URL="https://${OWNER}.github.io/"
+          if [ "$repo" = "${owner}.github.io" ]; then
+            site_url="https://${owner}.github.io/"
           else
-            SITE_URL="https://${OWNER}.github.io/${REPO}/"
+            site_url="https://${owner}.github.io/${repo}/"
           fi
 
           if echo "$BRANCHES_ARCHIVED" | tr ' ' '\n' | grep -Fxq "${{ matrix.branch }}"; then
             {
               echo 'html:'
-              echo "  announcement: 'You are viewing an archived version of the book. Click <a href=\"${SITE_URL}${PRIMARY_BRANCH}\">here</a> for the latest version.'"
+              echo "  announcement: 'You are viewing an archived version of the book. Click <a href=\"${site_url}${PRIMARY_BRANCH}\">here</a> for the latest version.'"
             } >> book/_config.yml
-            cat book/_config.yml
           fi
 
-      - if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
-        name: Preprocess & build the book from branch
+      - name: Build book
+        if: ${{ steps.cache-html.outputs.cache-hit != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -212,7 +211,7 @@ jobs:
 
           teachbooks build $option_release book/ > >(tee stdout.log) 2> >(tee stderr.log >&2)
 
-      - name: If failed, restore a book for this branch from cache
+      - name: Restore cached build if failed
         if: failure()
         id: attempt-restore
         uses: actions/cache/restore@v4
@@ -221,63 +220,56 @@ jobs:
           path: book/_build/html
           restore-keys: html-build-${{ matrix.branch }}
 
-      - name: Debug cache attempt output
-        if: failure()
-        run: |
-          echo "cache-hit: ${{ steps.attempt-restore.outputs.cache-hit }}"
-          echo "cache-primary-key: ${{ steps.attempt-restore.outputs.cache-primary-key }}"
-          echo "cache-matched-key: ${{ steps.attempt-restore.outputs.cache-matched-key }}"
-
       - name: Record build failure
         if: failure()
         shell: bash
         run: |
           if [ -z "${{ steps.attempt-restore.outputs.cache-matched-key }}" ]; then
-            echo ":o: \\\`Build failed [2]\\\`" | tee buildstatus.txt
+            echo ":o: \`Build failed [2]\`" > buildstatus.txt
           else
-            echo ":red_circle: \\\`Build failed [1]\\\`" | tee buildstatus.txt
+            echo ":red_circle: \`Build failed [1]\`" > buildstatus.txt
           fi
 
       - name: Record build success
         if: success()
-        run: echo ":white_check_mark: \\\`Released\\\`" > buildstatus.txt
+        run: echo ":white_check_mark: \`Released\`" > buildstatus.txt
 
-      - name: Make summary of errors, if any
+      - name: Make summary of errors
         if: always()
         shell: bash
         run: |
           touch summary.md
           if [ -s stderr.log ]; then
             {
-              echo "On branch \\\`${{ matrix.branch }}\\\`:"
+              echo "On branch \`${{ matrix.branch }}\`:"
               echo '```'
               cat stderr.log
               echo '```'
             } >> summary.md
           fi
 
-      - name: Clean branch name of disallowed characters
+      - name: Clean branch name
         if: always()
         shell: bash
         run: |
           clean_branch=$(printf '%s' "${{ matrix.branch }}" | tr '/\":<>|*?\\' '-')
           echo "MATRIX_BRANCH_NAME_CLEAN=$clean_branch" >> "$GITHUB_ENV"
 
-      - name: Upload summary as an artifact
+      - name: Upload summary artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: _summary-${{ env.MATRIX_BRANCH_NAME_CLEAN }}
           path: summary.md
 
-      - name: Upload build status as an artifact
+      - name: Upload build status artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: _buildstatus-${{ env.MATRIX_BRANCH_NAME_CLEAN }}
           path: buildstatus.txt
 
-      - name: Upload the built book HTML as an artifact
+      - name: Upload built HTML artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -286,30 +278,33 @@ jobs:
 
   deploy-books:
     if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     needs:
       - get-branches
       - build-books
-    timeout-minutes: 30
-    runs-on: ubuntu-latest
     permissions:
       pages: write
       id-token: write
       contents: read
     env:
       BRANCHES: ${{ needs.get-branches.outputs.branches }}
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
           token: ${{ env.GH_TOKEN }}
 
-      - run: mkdir -p final
+      - name: Make final folder
+        run: mkdir -p final
 
-      - name: Download all artifacts
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: final/
 
-      - name: Extract extras from the downloaded artifacts
+      - name: Extract extras
         shell: bash
         run: |
           set -euo pipefail
@@ -317,12 +312,12 @@ jobs:
           mv final/_summary-* _summaries/ 2>/dev/null || true
           mv final/_buildstatus-* _buildstatus/ 2>/dev/null || true
 
-      - name: Clean artifacts (1)
+      - name: Delete summary artifacts
         uses: GeekyEggo/delete-artifact@v5.0.0
         with:
           name: _summary-*
 
-      - name: Clean artifacts (2)
+      - name: Delete buildstatus artifacts
         uses: GeekyEggo/delete-artifact@v5.0.0
         with:
           name: _buildstatus-*
@@ -332,19 +327,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          OWNER="${GITHUB_REPOSITORY%/*}"
-          REPO="${GITHUB_REPOSITORY#*/}"
+          owner="${GITHUB_REPOSITORY%/*}"
+          repo="${GITHUB_REPOSITORY#*/}"
 
-          if [ "$REPO" = "${OWNER}.github.io" ]; then
-            SITE_URL="https://${OWNER}.github.io/"
+          if [ "$repo" = "${owner}.github.io" ]; then
+            site_url="https://${owner}.github.io/"
           else
-            SITE_URL="https://${OWNER}.github.io/${REPO}/"
+            site_url="https://${owner}.github.io/${repo}/"
           fi
 
-          echo "SITE_URL=$SITE_URL" >> "$GITHUB_ENV"
+          echo "SITE_URL=$site_url" >> "$GITHUB_ENV"
 
-      - name: Copy primary book to root, fail if names conflict
-        timeout-minutes: 1
+      - name: Copy primary book to root
         if: ${{ env.BEHAVIOR_PRIMARY == 'copy' }}
         shell: bash
         run: |
@@ -355,7 +349,6 @@ jobs:
           fi
 
       - name: Move primary book to root
-        timeout-minutes: 1
         if: ${{ env.BEHAVIOR_PRIMARY == 'move' }}
         shell: bash
         run: |
@@ -386,7 +379,7 @@ jobs:
             if [ -f "_buildstatus/_buildstatus-$clean/buildstatus.txt" ]; then
               cat "_buildstatus/_buildstatus-$clean/buildstatus.txt" >> status.txt
             else
-              echo ":o: \\\`Build status missing\\\`" >> status.txt
+              echo ":o: \`Build status missing\`" >> status.txt
             fi
           done < clean.txt
 
@@ -405,28 +398,28 @@ jobs:
           {
             echo
             echo "#### Legend for build status"
-            echo ":white_check_mark: \\\`Released\\\` - build success, new version released."
-            echo ":red_circle: \\\`Build failed [1]\\\` - build failure, previous version of the book reused."
-            echo ":o: \\\`Build failed [2]\\\` - build failure, no previous version reused."
+            echo ":white_check_mark: \`Released\` - build success, new version released."
+            echo ":red_circle: \`Build failed [1]\` - build failure, previous version reused."
+            echo ":o: \`Build failed [2]\` - build failure, no previous version reused."
             echo
             echo "#### Primary book at root"
             if [ "$BEHAVIOR_PRIMARY" = "copy" ]; then
-              echo "The book at the website root <${SITE_URL}> is from the primary branch \\\`$PRIMARY_BRANCH\\\`."
+              echo "The book at the website root <${SITE_URL}> is from the primary branch \`$PRIMARY_BRANCH\`."
             elif [ "$BEHAVIOR_PRIMARY" = "redirect" ]; then
-              echo "The book at the website root <${SITE_URL}> redirects to the primary branch \\\`$PRIMARY_BRANCH\\\`."
+              echo "The book at the website root <${SITE_URL}> redirects to the primary branch \`$PRIMARY_BRANCH\`."
             elif [ "$BEHAVIOR_PRIMARY" = "move" ]; then
-              echo "The book at the website root <${SITE_URL}> is from the primary branch \\\`$PRIMARY_BRANCH\\\`. It's deleted from the branch URL."
+              echo "The book at the website root <${SITE_URL}> is from the primary branch \`$PRIMARY_BRANCH\`. It's deleted from the branch URL."
             fi
             echo "Status: ${primary_status:-Unknown}"
           } >> summary.md
 
       - name: Symlink and summarise branch aliases
-        id: symlink-aliases
         shell: bash
         run: |
           set -euo pipefail
 
           echo "### Aliases" >> summary.md
+
           if echo "${BRANCH_ALIASES:-}" | grep -E '\S' >/dev/null; then
             {
               echo "| Alias :arrow_right: | Target :dart: | Link :link: | Build status :ballot_box_with_check: |"
@@ -455,7 +448,7 @@ jobs:
 
           {
             echo "### Preview of build errors & warnings"
-            echo "For more details please see the corresponding \\\`build-books\\\` jobs in the left pane."
+            echo "For more details please see the corresponding \`build-books\` jobs in the left pane."
           } >> summary.md
 
           rm -f tmp.md
@@ -472,190 +465,18 @@ jobs:
             echo "No build errors or warnings encountered." >> summary.md
           fi
 
-      - name: Add a custom 404 to redirect
+      - name: Add custom 404
         env:
           HTML_TEMPLATE_404_REDIRECT: |
             <!DOCTYPE html>
             <html lang="en">
             <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <title>Page Not Found</title>
-                <link rel="icon" href="https://teachbooks.io/wp-content/uploads/2024/12/cropped-TB_favicon-32x32.png" type="image/png">
-                <style>
-                    body {
-                        font-family: Arial, sans-serif;
-                        margin: 0;
-                        padding: 0;
-                        background-color: #f4f4f4;
-                        color: #333;
-                    }
-                    .container {
-                        max-width: 800px;
-                        margin: 50px auto;
-                        padding: 20px 20px 20px 20px;
-                        padding-top: 100px;
-                        background-color: #fff;
-                        box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-                        position: relative;
-                        border-radius: 8px;
-                    }
-                    .logo {
-                        position: absolute;
-                        top: 10px;
-                        right: 10px;
-                        width: 200px;
-                        padding: 10px;
-                        background-color: #fff;
-                        border-radius: 5px;
-                        box-shadow: 0 0 5px rgba(0, 0, 0, 0.1);
-                        transition: transform 0.2s;
-                    }
-                    .logo:hover {
-                        transform: scale(1.02);
-                    }
-                    @media (max-width: 768px) {
-                        .container {
-                            margin: 20px;
-                            padding: 20px;
-                            padding-top: 40px;
-                        }
-                        .logo {
-                            position: static;
-                            display: block;
-                            margin: 0 auto 20px auto;
-                            width: 150px;
-                        }
-                        .button-container .btn {
-                            display: block !important;
-                            margin: 15px auto !important;
-                            max-width: 250px;
-                            width: 90%;
-                        }
-                    }
-                    @media (max-width: 480px) {
-                        .logo {
-                            width: 120px;
-                        }
-                        .error-code {
-                            font-size: 3em;
-                        }
-                        h1 {
-                            font-size: 2em;
-                        }
-                        .button-container .btn {
-                            display: block !important;
-                            margin: 20px auto !important;
-                            max-width: 200px;
-                            width: 80%;
-                        }
-                        .button-container {
-                            margin: 40px 0;
-                        }
-                    }
-                    h1 {
-                        font-family: 'Courier New', monospace, Arial, sans-serif;
-                        color: #85A5FF;
-                        font-size: 2.5em;
-                        margin-bottom: 20px;
-                        text-align: center;
-                    }
-                    .error-code {
-                        font-family: 'Courier New', monospace, Arial, sans-serif;
-                        font-size: 4em;
-                        color: #FFD400;
-                        text-align: center;
-                        margin: 20px 0;
-                        font-weight: bold;
-                        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.1);
-                    }
-                    p {
-                        font-size: 1.1em;
-                        line-height: 1.6;
-                        margin-bottom: 20px;
-                        text-align: center;
-                        color: #3B60E4;
-                    }
-                    .redirecting {
-                        display: none;
-                        text-align: center;
-                        font-style: italic;
-                        color: #3B60E4;
-                        font-weight: 500;
-                    }
-                    .spinner {
-                        border: 2px solid #f3f3f3;
-                        border-top: 2px solid #FFD400;
-                        border-radius: 50%;
-                        width: 20px;
-                        height: 20px;
-                        animation: spin 1s linear infinite;
-                        display: inline-block;
-                        margin-right: 10px;
-                    }
-                    .button-container {
-                        text-align: center;
-                        margin: 30px 0;
-                    }
-                    .btn {
-                        display: inline-block;
-                        background-color: #85A5FF;
-                        color: white;
-                        padding: 12px 24px;
-                        text-decoration: none;
-                        border-radius: 5px;
-                        margin: 0 10px;
-                        transition: background-color 0.3s;
-                    }
-                    .btn:hover {
-                        background-color: #6B8FFF;
-                        text-decoration: none;
-                    }
-                    .btn-secondary {
-                        background-color: #F0F4FF;
-                        color: #85A5FF;
-                        border: 1px solid #85A5FF;
-                    }
-                    .btn-secondary:hover {
-                        background-color: #E1EBFF;
-                        color: #6B8FFF;
-                    }
-                    .btn-github {
-                        background-color: #3B60E4;
-                        color: white;
-                        border: 1px solid #3B60E4;
-                    }
-                    .btn-github:hover {
-                        background-color: #2A4BC7;
-                        color: white;
-                    }
-                    @keyframes spin {
-                        0% { transform: rotate(0deg); }
-                        100% { transform: rotate(360deg); }
-                    }
-                </style>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>Page Not Found</title>
             </head>
             <body>
-                <div class="container">
-                    <a href="https://teachbooks.io/" target="_blank">
-                        <img src="https://teachbooks.io/wp-content/uploads/2025/01/GIF_TeachBooks_01_Square_800x800_Alpha.gif" alt="TeachBooks Logo" class="logo">
-                    </a>
-                    <div class="error-code">404</div>
-                    <h1 id="page-title">Page Not Found</h1>
-                    <div id="content">
-                        <p>The page you're looking for doesn't exist.</p>
-                        <div class="button-container">
-                            <a href="#" id="root-link" class="btn">Go to Homepage</a>
-                            <a href="javascript:history.back()" class="btn btn-secondary">Go Back</a>
-                            <a href="#" id="github-link" class="btn btn-github">Go to Source Code</a>
-                        </div>
-                    </div>
-                    <div id="redirecting" class="redirecting">
-                        <div class="spinner"></div>
-                        Redirecting you to the correct page...
-                    </div>
-                </div>
-                <script>
+              <script>
                 let currentUrl = window.location.href;
                 let urlParts = currentUrl.split('/');
                 let bname = urlParts[4];
@@ -663,27 +484,28 @@ jobs:
                 let behaviorPrimary = '$BEHAVIOR_PRIMARY';
                 let rootUrl = urlParts.slice(0, 4).join('/') + '/';
                 let githubUrl = 'https://github.com/$GITHUB_REPOSITORY';
-                document.getElementById('root-link').href = rootUrl;
-                document.getElementById('github-link').href = githubUrl;
 
                 if (behaviorPrimary === 'redirect' && !branches.includes(bname)) {
-                    document.getElementById('page-title').textContent = 'Redirecting...';
-                    document.getElementById('content').style.display = 'none';
-                    document.getElementById('redirecting').style.display = 'block';
-
-                    setTimeout(function() {
-                        urlParts.splice(4, 0, '$PRIMARY_BRANCH');
-                        let newUrl = urlParts.join('/');
-                        window.location.href = newUrl;
-                    }, 0);
+                  urlParts.splice(4, 0, '$PRIMARY_BRANCH');
+                  let newUrl = urlParts.join('/');
+                  window.location.href = newUrl;
+                } else {
+                  document.body.innerHTML = `
+                    <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 60px auto; text-align: center;">
+                      <h1>404 - Page Not Found</h1>
+                      <p>The page you're looking for doesn't exist.</p>
+                      <p><a href="${rootUrl}">Go to Homepage</a></p>
+                      <p><a href="${githubUrl}">Go to Source Code</a></p>
+                    </div>
+                  `;
                 }
-                </script>
+              </script>
             </body>
             </html>
         run: |
-          echo "$HTML_TEMPLATE_404_REDIRECT" | envsubst | tee final/404.html
+          echo "$HTML_TEMPLATE_404_REDIRECT" | envsubst > final/404.html
 
-      - name: Upload final Pages artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: final/
@@ -692,7 +514,7 @@ jobs:
         id: deployment
         uses: actions/deploy-pages@v4
 
-      - name: Upload summary as artifact
+      - name: Upload final summary artifact
         uses: actions/upload-artifact@v4
         with:
           name: _final-summary
@@ -700,11 +522,12 @@ jobs:
 
   summarize:
     if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     needs:
       - get-branches
       - deploy-books
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+
     steps:
       - name: Download final summary artifact
         uses: actions/download-artifact@v4
@@ -721,23 +544,22 @@ jobs:
             cat summary.md >> "$GITHUB_STEP_SUMMARY"
           else
             {
-              echo "An unknown error has occurred, cannot display summary. It may be there were too many errors or warnings in the book build process."
+              echo "An unknown error has occurred, cannot display summary."
               echo
-              echo "- You can try building the books locally, or inspecting the workflow run logs to troubleshoot the issue."
+              echo "- You can try building the books locally, or inspect the workflow logs."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
           isdefault() {
             if [ -z "$1" ]; then
-              echo '(default value used)'
+              echo "(default value used)"
             else
-              echo ''
+              echo ""
             fi
           }
 
           {
             echo "### Repository configuration variables"
-            echo "Variables can be set at ${{ format('{0}/{1}/settings/variables/actions', github.server_url, github.repository) }}"
             echo '```'
             echo "PRIMARY_BRANCH=$PRIMARY_BRANCH $(isdefault '${{ vars.PRIMARY_BRANCH }}')"
             echo "BEHAVIOR_PRIMARY=$BEHAVIOR_PRIMARY $(isdefault '${{ vars.BEHAVIOR_PRIMARY }}')"
